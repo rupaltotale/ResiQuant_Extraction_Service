@@ -112,6 +112,30 @@ export default function Home() {
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
 
+  const formatSize = (bytes) => {
+    if (!bytes && bytes !== 0) return '—';
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${Math.round(kb)} KB`;
+    return `${(kb / 1024).toFixed(2)} MB`;
+  };
+
+  const fileKind = (f) => {
+    const name = String(f?.name || '').toLowerCase();
+    const type = String(f?.type || '').toLowerCase();
+    if (type.includes('pdf') || name.endsWith('.pdf')) return 'PDFs';
+    if (type.includes('spreadsheet') || name.endsWith('.xlsx')) return 'Spreadsheets';
+    return 'Other';
+  };
+
+  const groupedAttachments = (() => {
+    const groups = { PDFs: [], Spreadsheets: [], Other: [] };
+    attachments.forEach((f, index) => {
+      const k = fileKind(f);
+      groups[k].push({ file: f, index });
+    });
+    return groups;
+  })();
+
   const handleEmailPdfChange = (e) => {
     const f = (e.target.files || [])[0] || null;
     setEmailPdf(f);
@@ -133,6 +157,10 @@ export default function Home() {
     if (attachmentsInputRef.current) {
       attachmentsInputRef.current.value = '';
     }
+  };
+
+  const handleRemoveAttachment = (idx) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const handleSubmit = async (e) => {
@@ -170,48 +198,112 @@ export default function Home() {
   return (
     <div style={{ maxWidth: 800, margin: '40px auto', padding: 16, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto' }}>
       <h1>ResiQuant Extraction Service</h1>
-      <p>Upload the email chain PDF and optional attachments to see structured JSON.</p>
+      <p>Upload the email chain PDF and optional attachments to see relevant information.</p>
 
       <form onSubmit={handleSubmit} style={{ display: 'grid', gap: 12, marginTop: 16 }}>
-        <label>
-          Email Chain (PDF)
+        <div style={{
+          border: '1px solid #e1e4e8',
+          borderRadius: 6,
+          padding: 10,
+          background: '#fafbfc'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <label htmlFor="email-pdf" style={{ fontWeight: 600 }}>Email Chain (PDF)</label>
+            {emailPdf && (
+              <button type="button" onClick={handleClearEmailPdf} disabled={loading} style={{ padding: '6px 10px' }}>
+                Clear
+              </button>
+            )}
+          </div>
           <input
+            id="email-pdf"
             type="file"
             accept="application/pdf"
             onChange={handleEmailPdfChange}
             required
             ref={emailPdfInputRef}
-            style={{ width: '100%', padding: 8, marginTop: 4 }}
+            style={{ width: '100%', padding: 8, marginTop: 6 }}
           />
           {emailPdf && (
             <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
               <small>{emailPdf.name}</small>
-              <button type="button" onClick={handleClearEmailPdf} disabled={loading} style={{ padding: '6px 10px' }}>
-                Clear Email PDF
-              </button>
             </div>
           )}
-        </label>
+        </div>
 
-        <label>
-          Attachments (optional, PDF/XLSX)
+        <div style={{
+          border: '1px solid #e1e4e8',
+          borderRadius: 6,
+          padding: 10,
+          background: '#fafbfc'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <label htmlFor="attachments-input" style={{ fontWeight: 600 }}>Attachments (optional, PDF/XLSX)</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {attachments.length > 0 && (
+                <small style={{ color: '#444' }}>{attachments.length} attachment{attachments.length > 1 ? 's' : ''} selected</small>
+              )}
+              <button type="button" onClick={handleClearAttachments} disabled={loading || attachments.length === 0} style={{ padding: '6px 10px' }}>
+                Clear All
+              </button>
+            </div>
+          </div>
           <input
+            id="attachments-input"
             type="file"
             accept="application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             multiple
             ref={attachmentsInputRef}
             onChange={handleAttachmentsChange}
-            style={{ width: '100%', padding: 8, marginTop: 4 }}
+            style={{ width: '100%', padding: 8, marginTop: 6 }}
           />
           {attachments.length > 0 && (
-            <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-              <small>{attachments.length} attachment{attachments.length > 1 ? 's' : ''} selected</small>
-              <button type="button" onClick={handleClearAttachments} disabled={loading} style={{ padding: '6px 10px' }}>
-                Clear Attachments
-              </button>
+            <div style={{ display: 'grid', gap: 10, marginTop: 8 }}>
+              {(['PDFs', 'Spreadsheets', 'Other']).map((groupName) => {
+                const items = groupedAttachments[groupName] || [];
+                if (items.length === 0) return null;
+                return (
+                  <div key={groupName}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{groupName}</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                      {items.map(({ file, index }) => (
+                        <div key={`${groupName}-${index}`} style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          border: '1px solid #e1e4e8',
+                          background: '#ffffff',
+                          borderRadius: 20,
+                          padding: '6px 10px'
+                        }}>
+                          <span style={{ fontSize: 12 }}>{file.name}</span>
+                          <span style={{ fontSize: 12, color: '#586069' }}>{formatSize(file.size)}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveAttachment(index)}
+                            disabled={loading}
+                            aria-label={`Remove ${file.name}`}
+                            style={{
+                              border: 'none',
+                              background: '#f6f8fa',
+                              borderRadius: 12,
+                              padding: '0 6px',
+                              cursor: 'pointer',
+                              fontSize: 12,
+                              lineHeight: '18px'
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
-        </label>
+        </div>
 
         <button type="submit" disabled={loading} style={{ padding: '10px 14px' }}>
           {loading ? 'Uploading…' : 'Upload'}
