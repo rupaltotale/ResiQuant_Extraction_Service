@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import hashlib
 from typing import List, Dict, Any
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -15,6 +16,9 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 from openai import OpenAI  # OpenAI SDK
 import openpyxl  # XLSX parsing
 from pypdf import PdfReader  # PDF text extraction
+
+# Simple in-memory cache to avoid duplicate LLM calls for identical inputs
+LLM_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def extract_text_from_pdf(file_stream: io.BytesIO) -> str:
@@ -130,6 +134,22 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "instructions": schema_description,
     }
 
+    # Cache key derived from content + model + instructions to avoid duplicate calls
+    cache_key_payload = {
+        "email_thread_text": email_text,
+        "attachments": attachments_summary,
+        "model": OPENAI_MODEL,
+        "instructions": schema_description,
+    }
+    cache_key = hashlib.sha256(json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    cached = LLM_CACHE.get(cache_key)
+    if cached and cached.get("status") == "ok":
+        # Mark cached result to help clients optionally identify hits
+        result = dict(cached)
+        result["cached"] = True
+        return result
+
     try:
         client = OpenAI()
         resp = client.chat.completions.create(
@@ -149,7 +169,10 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
             import re
             m = re.search(r"\{[\s\S]*\}", content)
             parsed = json.loads(m.group(0)) if m else {"raw": content}
-        return {"status": "ok", "model": OPENAI_MODEL, "data": parsed}
+        result = {"status": "ok", "model": OPENAI_MODEL, "data": parsed}
+        # Store successful responses in cache
+        LLM_CACHE[cache_key] = result
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
