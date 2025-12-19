@@ -11,6 +11,36 @@ FLASK_APP=app.py FLASK_ENV=development python app.py
 
 By default the server runs on http://localhost:5000.
 
+## Testing
+
+Install dev requirements and run pytest from the `backend/` directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
+```
+
+## Logging
+
+Structured logs are emitted as single-line JSON with safe fields (no PII):
+
+- event: high-level action (e.g., `upload_processed`, `validation_error`, `llm_error`)
+- request_id: per-request UUID
+- route: endpoint path
+- source_hash: SHA-256 of input bytes (email + attachments)
+- cache_hit: whether the LLM result was reused
+- llm_status: `ok` | `skipped` | `error`
+- llm_latency_ms: round-trip time for LLM call
+- model: LLM model used
+- document_count: number of uploaded documents
+- broker_email_hash: SHA-256 of broker email, if present
+- error_category: `validation` | `provider` | `timeout` (on failures)
+- elapsed_ms: total request processing time
+
+Configure log level via `LOG_LEVEL` (default `INFO`). Secrets must be provided via env (e.g., `OPENAI_API_KEY`) and are never logged.
+
 ## API
 
 - `GET /health` → `{ "status": "ok" }`

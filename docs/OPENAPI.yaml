@@ -1,0 +1,185 @@
+openapi: 3.0.3
+info:
+  title: ResiQuant Extraction API
+  version: 0.1.0
+servers:
+  - url: http://localhost:5000
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /api/upload:
+    post:
+      summary: Upload email PDF and optional attachments
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - email_pdf
+              properties:
+                email_pdf:
+                  type: string
+                  format: binary
+                  description: Email chain PDF (required)
+                attachments:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Optional attachments (PDF/XLSX)
+      responses:
+        '200':
+          description: Parsed result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email_document:
+                    $ref: '#/components/schemas/DocumentMeta'
+                  attachments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DocumentMeta'
+                  document_count:
+                    type: integer
+                  llm_parsed:
+                    $ref: '#/components/schemas/LLMParsed'
+                  provenance:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/ProvenanceItem'
+components:
+  schemas:
+    DocumentMeta:
+      type: object
+      properties:
+        filename:
+          type: string
+        mime_type:
+          type: string
+        size_bytes:
+          type: integer
+        text_preview:
+          type: string
+        parsed_fields:
+          type: object
+    LLMParsed:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, skipped, error]
+        model:
+          type: string
+        data:
+          $ref: '#/components/schemas/ExtractionData'
+        message:
+          type: string
+          description: Present only when status=error
+        cached:
+          type: boolean
+          description: Present if response reused from cache
+    ExtractionData:
+      type: object
+      properties:
+        broker_name:
+          type: string
+          nullable: true
+        broker_email:
+          type: string
+          nullable: true
+        brokerage:
+          type: string
+          nullable: true
+        complete_brokerage_address:
+          type: string
+          nullable: true
+        property_addresses:
+          type: array
+          items:
+            type: string
+        confidence_overall:
+          type: number
+          format: float
+          description: May be omitted in UI; still returned by backend
+        field_confidence:
+          type: object
+          properties:
+            broker_name:
+              $ref: '#/components/schemas/FieldConfidence'
+            broker_email:
+              $ref: '#/components/schemas/FieldConfidence'
+            brokerage:
+              $ref: '#/components/schemas/FieldConfidence'
+            complete_brokerage_address:
+              $ref: '#/components/schemas/FieldConfidence'
+            property_addresses:
+              allOf:
+                - $ref: '#/components/schemas/FieldConfidence'
+                - type: object
+                  properties:
+                    per_address:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          address:
+                            type: string
+                          score:
+                            type: number
+                          explanation:
+                            type: string
+        citations:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/Citation'
+    FieldConfidence:
+      type: object
+      properties:
+        score:
+          type: number
+        explanation:
+          type: string
+    Citation:
+      type: object
+      properties:
+        source:
+          type: string
+          description: 'email_pdf' or exact attachment filename
+        snippet:
+          type: string
+        match:
+          type: string
+          description: exact text matched in snippet
+    ProvenanceItem:
+      type: object
+      properties:
+        doc:
+          type: string
+        page:
+          type: integer
+          nullable: true
+        snippet:
+          type: string
+        match:
+          type: string
+          nullable: true

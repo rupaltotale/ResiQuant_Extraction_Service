@@ -2,6 +2,10 @@ import os
 import io
 import json
 import hashlib
+import logging
+import time
+import uuid
+import re
 from typing import List, Dict, Any, Optional
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -19,6 +23,43 @@ from pypdf import PdfReader  # PDF text extraction
 
 # Simple in-memory cache to avoid duplicate LLM calls for identical inputs
 LLM_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+# --- Logging setup -----------------------------------------------------------
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(message)s")
+logger = logging.getLogger("resiquant")
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _json_log(level: str, payload: Dict[str, Any]) -> None:
+    lvl = getattr(logging, level.upper(), logging.INFO)
+    # Ensure minimal, structured JSON without secrets/PII
+    try:
+        logger.log(lvl, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        # Best-effort logging fallback
+        logger.log(lvl, str(payload))
+
+
+def _hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _hash_string(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def redact_emails(text: str) -> str:
+    # Replace emails with a generic token; avoid logging raw PII
+    return EMAIL_RE.sub("[REDACTED_EMAIL]", text or "")
 
 
 def extract_text_from_pdf(file_stream: io.BytesIO) -> str:
@@ -319,7 +360,17 @@ def health() -> Any:
 
 @app.post("/api/upload")
 def upload() -> Any:
+    request_id = str(uuid.uuid4())
+    route = "/api/upload"
+    req_start = _now_ms()
     if not request.files:
+        _json_log("WARNING", {
+            "event": "validation_error",
+            "request_id": request_id,
+            "route": route,
+            "error_category": "validation",
+            "reason": "no_files",
+        })
         return jsonify({"error": "No files provided"}), 400
 
     # New contract: one email chain PDF under 'email_pdf', zero or more attachments under 'attachments'
@@ -329,6 +380,13 @@ def upload() -> Any:
     # Expect explicit fields only: 'email_pdf' and optional 'attachments'
 
     if not email_pdf:
+        _json_log("WARNING", {
+            "event": "validation_error",
+            "request_id": request_id,
+            "route": route,
+            "error_category": "validation",
+            "reason": "missing_email_pdf",
+        })
         return jsonify({"error": "Missing 'email_pdf' file"}), 400
 
     # Process email PDF
@@ -360,8 +418,17 @@ def upload() -> Any:
             "text_preview": meta.get("text_preview", ""),
         })
 
+    # Compute a source hash from email + attachments bytes (no PII logged)
+    h = hashlib.sha256()
+    h.update(email_data)
+    for ar in attachment_raw:
+        h.update(ar.get("data", b""))
+    source_hash = h.hexdigest()
+
     # Call LLM for structured JSON
+    llm_start = _now_ms()
     llm = call_llm_for_structured_output(email_text=email_text, attachments=attachments)
+    llm_latency_ms = _now_ms() - llm_start
 
     provenance: Dict[str, List[Dict[str, Any]]] = {}
     if llm.get("status") == "ok":
@@ -395,6 +462,23 @@ def upload() -> Any:
                 attachments_raw=attachment_raw,
                 llm_data=data_obj,
             )
+    elif llm.get("status") == "error":
+        # Categorize provider errors
+        msg = (llm.get("message") or "").lower()
+        if "timeout" in msg:
+            category = "timeout"
+        else:
+            category = "provider"
+        _json_log("ERROR", {
+            "event": "llm_error",
+            "request_id": request_id,
+            "route": route,
+            "source_hash": source_hash,
+            "llm_latency_ms": llm_latency_ms,
+            "model": llm.get("model") or OPENAI_MODEL,
+            "error_category": category,
+            "message": msg[:300],
+        })
 
     result = {
         "email_document": email_meta,
@@ -403,7 +487,28 @@ def upload() -> Any:
         "llm_parsed": llm,
         "provenance": provenance,
     }
-    return jsonify(result), 200
+    status_code = 200
+
+    # Safe, structured success log
+    data_obj = llm.get("data", {}) if isinstance(llm, dict) else {}
+    broker_email = data_obj.get("broker_email") if isinstance(data_obj, dict) else None
+    broker_email_hash = _hash_string(broker_email) if isinstance(broker_email, str) and broker_email.strip() else None
+
+    _json_log("INFO", {
+        "event": "upload_processed",
+        "request_id": request_id,
+        "route": route,
+        "source_hash": source_hash,
+        "cache_hit": bool(llm.get("cached")),
+        "llm_status": llm.get("status"),
+        "llm_latency_ms": llm_latency_ms,
+        "model": llm.get("model") or OPENAI_MODEL,
+        "document_count": 1 + len(attachments),
+        "broker_email_hash": broker_email_hash,
+        "elapsed_ms": _now_ms() - req_start,
+    })
+
+    return jsonify(result), status_code
 
 
 if __name__ == "__main__":
