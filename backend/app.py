@@ -2,7 +2,7 @@ import os
 import io
 import json
 import hashlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -109,7 +109,13 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
     system_instructions = (
         "You are a precise extraction assistant. "
         "Extract brokerage details and property addresses from the provided email thread text and attachment summaries. "
-        "Always return strictly valid JSON that conforms to the schema. No extra text."
+        "Always return strictly valid JSON that conforms to the schema. No extra text.\n\n"
+        "Domain Context: The auto-ingest of insurance submission documents is a process that automates the current "
+        "manual process of reading insurance email submissions (and attachments) to extract relevant building attributes "
+        "of the properties requesting coverage such as construction class, occupancy type, number of stories, and others. "
+        "These attributes are necessary for running a catastrophe model and providing a quote. Every insurance submission is different; "
+        "each broker has their own document format and property data is often sparse, unstandardized, and unvetted. "
+        "Interpret fields semantically and prefer explicit mentions from the documents. If information is missing or uncertain, return null rather than guessing."
     )
 
     schema_description = (
@@ -119,12 +125,34 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "  \"broker_email\": string|null,\n"
         "  \"brokerage\": string|null,\n"
         "  \"complete_brokerage_address\": string|null,\n"
-        "  \"property_addresses\": [string]\n"
+        "  \"property_addresses\": [string],\n"
+        "  \"confidence_overall\": number,\n"
+        "  \"citations\": {\n"
+        "    // For each field above, provide an array of citations with source and a contextual snippet, plus the exact matched text\n"
+        "    \"broker_name\": [ { \"source\": \"email_pdf\"|string, \"snippet\": string, \"match\": string } ],\n"
+        "    \"broker_email\": [ { \"source\": \"email_pdf\"|string, \"snippet\": string, \"match\": string } ],\n"
+        "    \"brokerage\": [ { \"source\": \"email_pdf\"|string, \"snippet\": string, \"match\": string } ],\n"
+        "    \"complete_brokerage_address\": [ { \"source\": \"email_pdf\"|string, \"snippet\": string, \"match\": string } ],\n"
+        "    \"property_addresses\": [ { \"source\": \"email_pdf\"|string, \"snippet\": string, \"match\": string } ]\n"
+        "  },\n"
+        "  \"field_confidence\": {\n"
+        "    // Attach a confidence (0..1) and an explanation for why, per field\n"
+        "    \"broker_name\": { \"score\": number, \"explanation\": string },\n"
+        "    \"broker_email\": { \"score\": number, \"explanation\": string },\n"
+        "    \"brokerage\": { \"score\": number, \"explanation\": string },\n"
+        "    \"complete_brokerage_address\": { \"score\": number, \"explanation\": string },\n"
+        "    \"property_addresses\": { \"score\": number, \"explanation\": string, \"per_address\": [ { \"address\": string, \"score\": number, \"explanation\": string } ] }\n"
+        "  }\n"
         "}\n"
         "Rules:\n"
         "- Use the email thread text primarily; use attachment summaries as secondary hints.\n"
-        "- If a field is not present, return null.\n"
+        "- Citations must be snippets that include the exact matched text plus surrounding context (25–120 characters on each side) from the provided texts (email thread or attachment previews).\n"
+        "- The \"source\" must be either \"email_pdf\" or the exact attachment filename provided.\n"
+        "- If a field is not present, return null (and an empty citation list).\n"
         "- \"property_addresses\" must be a list of unique, human-readable street addresses (one line each).\n"
+        "- Set \"confidence_overall\" to reflect your certainty (0..1).\n"
+        "- For each field, set \"field_confidence\" with a numeric score and a concise explanation that references specific evidence (e.g., a phrase inside the snippet).\n"
+        "- In citations, set \"match\" equal to the exact text you used to identify the field (e.g., the broker name or address).\n"
         "- Do not include commentary, only the JSON object."
     )
 
@@ -132,6 +160,7 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "email_thread_text": email_text,
         "attachments": attachments_summary,
         "instructions": schema_description,
+        "domain_context": "Insurance submissions vary widely; data may be sparse/unstandardized. Prefer explicit text; do not infer beyond the documents.",
     }
 
     # Cache key derived from content + model + instructions to avoid duplicate calls
@@ -177,6 +206,112 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         return {"status": "error", "message": str(e)}
 
 
+def _make_snippet(text: str, start: int, end: int, context: int = 120) -> str:
+    left = max(0, start - context)
+    right = min(len(text), end + context)
+    snippet = text[left:right].replace("\n", " ")
+    if left > 0:
+        snippet = "…" + snippet
+    if right < len(text):
+        snippet = snippet + "…"
+    return snippet
+
+
+def find_in_pdf(data: bytes, term: str, max_hits: int = 1) -> List[Dict[str, Any]]:
+    hits: List[Dict[str, Any]] = []
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        lower_term = term.lower()
+        for idx, page in enumerate(reader.pages):
+            try:
+                txt = (page.extract_text() or "")
+            except Exception:
+                continue
+            lower_txt = txt.lower()
+            pos = lower_txt.find(lower_term)
+            if pos != -1:
+                snippet = _make_snippet(txt, pos, pos + len(term))
+                hits.append({"page": idx + 1, "snippet": snippet})
+                if len(hits) >= max_hits:
+                    break
+        return hits
+    except Exception:
+        return hits
+
+
+def find_in_text(text: str, term: str) -> Optional[str]:
+    lower_txt = (text or "").lower()
+    lower_term = term.lower()
+    pos = lower_txt.find(lower_term)
+    if pos == -1:
+        return None
+    return _make_snippet(text, pos, pos + len(term))
+
+
+def compute_provenance(
+    email_pdf_bytes: bytes,
+    email_pdf_name: str,
+    attachments_raw: List[Dict[str, Any]],
+    llm_data: Dict[str, Any],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Compute provenance for extracted fields by searching source texts.
+
+    Produces a map of field -> [{ doc, page, snippet }].
+    - Searches across the email PDF (page-level) and attachments (PDF page-level or text preview).
+    """
+    provenance: Dict[str, List[Dict[str, Any]]] = {}
+
+    def add_prov(field: str, doc: str, page: Optional[int], snippet: Optional[str], match: Optional[str] = None):
+        if not snippet:
+            return
+        entry = {
+            "doc": doc,
+            "page": page,
+            "snippet": snippet,
+        }
+        if isinstance(match, str) and match.strip():
+            entry["match"] = match
+        provenance.setdefault(field, []).append(entry)
+
+    # Scalar fields
+    for field in ["broker_name", "broker_email", "brokerage", "complete_brokerage_address"]:
+        val = llm_data.get(field)
+        if isinstance(val, str) and val.strip():
+            # Search email PDF pages
+            for hit in find_in_pdf(email_pdf_bytes, val, max_hits=1):
+                add_prov(field, email_pdf_name or "email_pdf", hit.get("page"), hit.get("snippet"), match=val)
+            # Search attachments previews and PDFs
+            for att in attachments_raw:
+                # Try PDF page search if PDF
+                if (att.get("mimetype", "").lower() == "application/pdf") or (att.get("filename", "").lower().endswith(".pdf")):
+                    for hit in find_in_pdf(att.get("data", b""), val, max_hits=1):
+                        add_prov(field, att.get("filename") or "attachment", hit.get("page"), hit.get("snippet"), match=val)
+                else:
+                    snip = find_in_text(att.get("text_preview", ""), val)
+                    if snip:
+                        add_prov(field, att.get("filename") or "attachment", None, snip, match=val)
+
+    # List of addresses
+    addrs = llm_data.get("property_addresses") or []
+    if isinstance(addrs, list):
+        for addr in addrs:
+            if not isinstance(addr, str) or not addr.strip():
+                continue
+            field = "property_addresses"
+            for hit in find_in_pdf(email_pdf_bytes, addr, max_hits=1):
+                add_prov(field, email_pdf_name or "email_pdf", hit.get("page"), hit.get("snippet"), match=addr)
+            for att in attachments_raw:
+                if (att.get("mimetype", "").lower() == "application/pdf") or (att.get("filename", "").lower().endswith(".pdf")):
+                    for hit in find_in_pdf(att.get("data", b""), addr, max_hits=1):
+                        add_prov(field, att.get("filename") or "attachment", hit.get("page"), hit.get("snippet"), match=addr)
+                else:
+                    snip = find_in_text(att.get("text_preview", ""), addr)
+                    if snip:
+                        add_prov(field, att.get("filename") or "attachment", None, snip, match=addr)
+
+    return provenance
+
+
 @app.get("/health")
 def health() -> Any:
     return jsonify({"status": "ok"})
@@ -208,22 +343,65 @@ def upload() -> Any:
 
     # Process attachments
     attachments: List[Dict[str, Any]] = []
+    # Keep raw data for provenance search (not returned to client)
+    attachment_raw: List[Dict[str, Any]] = []
     for f in attachments_files:
         data = f.read() or b""
         try:
             f.seek(0)
         except Exception:
             pass
-        attachments.append(structure_document_json(f.filename or "", f.mimetype or "", data))
+        meta = structure_document_json(f.filename or "", f.mimetype or "", data)
+        attachments.append(meta)
+        attachment_raw.append({
+            "filename": f.filename or "",
+            "mimetype": f.mimetype or "",
+            "data": data,
+            "text_preview": meta.get("text_preview", ""),
+        })
 
     # Call LLM for structured JSON
     llm = call_llm_for_structured_output(email_text=email_text, attachments=attachments)
+
+    provenance: Dict[str, List[Dict[str, Any]]] = {}
+    if llm.get("status") == "ok":
+        data_obj = llm.get("data", {})
+        citations = data_obj.get("citations", {})
+        # Prefer LLM-provided citations (source + contextual snippet)
+        if isinstance(citations, dict):
+            for field, sources in citations.items():
+                if not isinstance(sources, list):
+                    continue
+                for c in sources:
+                    if not isinstance(c, dict):
+                        continue
+                    doc = c.get("source") or "email_pdf"
+                    snippet = c.get("snippet") or c.get("quote") or ""
+                    match = c.get("match")
+                    if snippet.strip():
+                        entry = {
+                            "doc": doc,
+                            "page": None,
+                            "snippet": snippet,
+                        }
+                        if isinstance(match, str) and match.strip():
+                            entry["match"] = match
+                        provenance.setdefault(field, []).append(entry)
+        # Fallback to computed provenance if citations missing
+        if not provenance:
+            provenance = compute_provenance(
+                email_pdf_bytes=email_data,
+                email_pdf_name=email_pdf.filename or "email_pdf",
+                attachments_raw=attachment_raw,
+                llm_data=data_obj,
+            )
 
     result = {
         "email_document": email_meta,
         "attachments": attachments,
         "document_count": 1 + len(attachments),
         "llm_parsed": llm,
+        "provenance": provenance,
     }
     return jsonify(result), 200
 

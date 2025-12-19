@@ -2,6 +2,107 @@ import { useState, useRef } from 'react';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
 
+function Info({ sources, confidence, matchText }) {
+  const [open, setOpen] = useState(false);
+  const hasSources = sources && sources.length > 0;
+  const hasConfidence = confidence && (typeof confidence.score === 'number' || confidence.explanation);
+  if (!hasSources && !hasConfidence) return null;
+
+  const highlightSnippet = (snippet, match) => {
+    const s = String(snippet || '');
+    const m = String(match || '').trim();
+    if (!s) return s;
+    if (!m) return s;
+    const idx = s.toLowerCase().indexOf(m.toLowerCase());
+    if (idx === -1) return s;
+    const before = s.slice(0, idx);
+    const mid = s.slice(idx, idx + m.length);
+    const after = s.slice(idx + m.length);
+    return (
+      <>
+        <span>{before}</span>
+        <span style={{ background: 'yellow' }}>{mid}</span>
+        <span>{after}</span>
+      </>
+    );
+  };
+  return (
+    <span style={{ marginLeft: 8, position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Show info"
+        style={{
+          border: '1px solid #e1e4e8',
+          background: '#f6f8fa',
+          borderRadius: 12,
+          padding: '0 6px',
+          cursor: 'pointer',
+          fontSize: 12,
+          lineHeight: '18px',
+        }}
+      >
+        ⓘ
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          style={{
+            position: 'absolute',
+            zIndex: 20,
+            top: '120%',
+            left: 0,
+            minWidth: 280,
+            maxWidth: 460,
+            background: '#ffffff',
+            border: '1px solid #e1e4e8',
+            borderRadius: 6,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.08)',
+            padding: 10,
+          }}
+        >
+          {hasConfidence && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontWeight: 600 }}>Confidence</div>
+              <div style={{ marginTop: 6, color: '#333' }}>
+                <div><strong>Score:</strong> <span>{typeof confidence.score === 'number' ? confidence.score.toFixed(2) : '—'}</span></div>
+                <div style={{ marginTop: 4 }}><strong>Why:</strong> <span>{confidence.explanation || '—'}</span></div>
+              </div>
+            </div>
+          )}
+          {hasSources && (
+            <div>
+              <div style={{ fontWeight: 600 }}>Provenance</div>
+              <div style={{ display: 'grid', gap: 8, marginTop: 6 }}>
+                {sources.map((s, idx) => (
+                  <div key={idx}>
+                    <div><strong>Doc:</strong> <span style={{ fontFamily: 'monospace' }}>{s.doc || '—'}</span></div>
+                    <div style={{ marginTop: 4 }}>
+                      <strong>Snippet:</strong>
+                      <div style={{
+                        marginTop: 4,
+                        background: '#f6f8fa',
+                        border: '1px dashed #e1e4e8',
+                        borderRadius: 4,
+                        padding: 8,
+                        whiteSpace: 'normal',
+                        overflowWrap: 'anywhere',
+                        wordBreak: 'break-word',
+                      }}>
+                        {highlightSnippet(s.snippet || '—', s.match || matchText)}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
 export default function Home() {
   const [emailPdf, setEmailPdf] = useState(null);
   const [attachments, setAttachments] = useState([]);
@@ -68,8 +169,8 @@ export default function Home() {
 
   return (
     <div style={{ maxWidth: 800, margin: '40px auto', padding: 16, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto' }}>
-      <h1>Document Uploader</h1>
-      <p>Upload one or more documents with your email to see structured JSON.</p>
+      <h1>ResiQuant Extraction Service</h1>
+      <p>Upload the email chain PDF and optional attachments to see structured JSON.</p>
 
       <form onSubmit={handleSubmit} style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <label>
@@ -124,17 +225,68 @@ export default function Home() {
       )}
 
       {result && (
-        <div style={{ marginTop: 24 }}>
-          <h2>Response</h2>
-          <pre style={{ background: '#f6f8fa', padding: 12, overflowX: 'auto' }}>
-            {JSON.stringify(result, null, 2)}
-          </pre>
+        <div style={{ marginTop: 24, display: 'grid', gap: 16 }}>
+          {/* LLM Parsed Box */}
+          {result.llm_parsed && result.llm_parsed.status === 'ok' && (
+            <div style={{ border: '1px solid #e1e4e8', borderRadius: 6, padding: 12 }}>
+              <h2 style={{ marginTop: 0 }}>LLM Parsed</h2>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {(() => { const fc = result.llm_parsed.data?.field_confidence || {}; return (
+                  <>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <strong>Broker Name:</strong>
+                  <span style={{ marginLeft: 6 }}>{result.llm_parsed.data?.broker_name ?? '—'}</span>
+                  <Info sources={result.provenance?.broker_name} confidence={fc.broker_name} matchText={result.llm_parsed.data?.broker_name} />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <strong>Broker Email:</strong>
+                  <span style={{ marginLeft: 6 }}>{result.llm_parsed.data?.broker_email ?? '—'}</span>
+                  <Info sources={result.provenance?.broker_email} confidence={fc.broker_email} matchText={result.llm_parsed.data?.broker_email} />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <strong>Brokerage:</strong>
+                  <span style={{ marginLeft: 6 }}>{result.llm_parsed.data?.brokerage ?? '—'}</span>
+                  <Info sources={result.provenance?.brokerage} confidence={fc.brokerage} matchText={result.llm_parsed.data?.brokerage} />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                  <strong>Brokerage Address:</strong>
+                  <span style={{ marginLeft: 6 }}>{result.llm_parsed.data?.complete_brokerage_address ?? '—'}</span>
+                  <Info sources={result.provenance?.complete_brokerage_address} confidence={fc.complete_brokerage_address} matchText={result.llm_parsed.data?.complete_brokerage_address} />
+                </div>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center' }}>
+                    <strong>Property Addresses:</strong>
+                    <Info sources={result.provenance?.property_addresses} confidence={fc.property_addresses} />
+                  </div>
+                  <ul style={{ marginTop: 6 }}>
+                    {(result.llm_parsed.data?.property_addresses || []).map((addr, i) => {
+                      const per = (fc.property_addresses?.per_address || []).find((x) => x && x.address === addr) || null;
+                      return (
+                        <li key={i} style={{ display: 'flex', alignItems: 'center' }}>
+                          <span>{addr}</span>
+                          {per && (
+                            <Info sources={null} confidence={{ score: per.score, explanation: per.explanation }} />
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+                  </>
+                ); })()}
+              </div>
+            </div>
+          )}
+
+          {/* Raw Response for debugging */}
+          <div>
+            <h2>Raw Response</h2>
+            <pre style={{ background: '#f6f8fa', padding: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', overflowX: 'hidden' }}>
+              {JSON.stringify(result, null, 2)}
+            </pre>
+          </div>
         </div>
       )}
-
-      <div style={{ marginTop: 24, opacity: 0.7 }}>
-        <small>Backend: {BACKEND_URL}</small>
-      </div>
     </div>
   );
 }
