@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
 
 export default function Home() {
   const [emailPdf, setEmailPdf] = useState(null);
   const [attachments, setAttachments] = useState([]);
+  const attachmentsInputRef = useRef(null);
+  const emailPdfInputRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
@@ -14,8 +16,22 @@ export default function Home() {
     setEmailPdf(f);
   };
 
+  const handleClearEmailPdf = () => {
+    setEmailPdf(null);
+    if (emailPdfInputRef.current) {
+      emailPdfInputRef.current.value = '';
+    }
+  };
+
   const handleAttachmentsChange = (e) => {
     setAttachments(Array.from(e.target.files || []));
+  };
+
+  const handleClearAttachments = () => {
+    setAttachments([]);
+    if (attachmentsInputRef.current) {
+      attachmentsInputRef.current.value = '';
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -63,8 +79,17 @@ export default function Home() {
             accept="application/pdf"
             onChange={handleEmailPdfChange}
             required
+            ref={emailPdfInputRef}
             style={{ width: '100%', padding: 8, marginTop: 4 }}
           />
+          {emailPdf && (
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <small>{emailPdf.name}</small>
+              <button type="button" onClick={handleClearEmailPdf} disabled={loading} style={{ padding: '6px 10px' }}>
+                Clear Email PDF
+              </button>
+            </div>
+          )}
         </label>
 
         <label>
@@ -73,9 +98,18 @@ export default function Home() {
             type="file"
             accept="application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             multiple
+            ref={attachmentsInputRef}
             onChange={handleAttachmentsChange}
             style={{ width: '100%', padding: 8, marginTop: 4 }}
           />
+          {attachments.length > 0 && (
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <small>{attachments.length} attachment{attachments.length > 1 ? 's' : ''} selected</small>
+              <button type="button" onClick={handleClearAttachments} disabled={loading} style={{ padding: '6px 10px' }}>
+                Clear Attachments
+              </button>
+            </div>
+          )}
         </label>
 
         <button type="submit" disabled={loading} style={{ padding: '10px 14px' }}>

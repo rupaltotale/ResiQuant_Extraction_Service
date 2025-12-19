@@ -168,12 +168,7 @@ def upload() -> Any:
     email_pdf = request.files.get('email_pdf')
     attachments_files = request.files.getlist('attachments')
 
-    # Backward compatibility: if only 'files' provided, treat the first as email, rest as attachments
-    if not email_pdf and not attachments_files:
-        files_fallback = request.files.getlist('files')
-        if files_fallback:
-            email_pdf = files_fallback[0]
-            attachments_files = files_fallback[1:]
+    # Expect explicit fields only: 'email_pdf' and optional 'attachments'
 
     if not email_pdf:
         return jsonify({"error": "Missing 'email_pdf' file"}), 400
