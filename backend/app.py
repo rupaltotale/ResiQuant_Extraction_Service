@@ -123,24 +123,25 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
     ]
 
     system_instructions = (
-        "You are a precise email parsing assistant. "
-        "Only output valid JSON per the schema. No commentary."
+        "You are a precise extraction assistant. "
+        "Extract brokerage details and property addresses from the provided email thread text and attachment summaries. "
+        "Always return strictly valid JSON that conforms to the schema. No extra text."
     )
 
     schema_description = (
-        "Return a JSON object with these fields: "
+        "Return a JSON object with exactly these fields and types:\n"
         "{\n"
-        "  \"email\": {\n"
-        "    \"subject\": string|null,\n"
-        "    \"from\": string|null,\n"
-        "    \"to\": [string],\n"
-        "    \"cc\": [string],\n"
-        "    \"date\": string|null,\n"
-        "    \"thread_summary\": string,\n"
-        "    \"action_items\": [string]\n"
-        "  },\n"
-        "  \"attachments\": [ { \"filename\": string, \"mime_type\": string, \"size_bytes\": number, \"notes\": string|null } ]\n"
-        "}"
+        "  \"broker_name\": string|null,\n"
+        "  \"broker_email\": string|null,\n"
+        "  \"brokerage\": string|null,\n"
+        "  \"complete_brokerage_address\": string|null,\n"
+        "  \"property_addresses\": [string]\n"
+        "}\n"
+        "Rules:\n"
+        "- Use the email thread text primarily; use attachment summaries as secondary hints.\n"
+        "- If a field is not present, return null.\n"
+        "- \"property_addresses\" must be a list of unique, human-readable street addresses (one line each).\n"
+        "- Do not include commentary, only the JSON object."
     )
 
     user_prompt = {
@@ -154,6 +155,7 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         resp = client.chat.completions.create(
             model=OPENAI_MODEL,
             temperature=0,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_instructions},
                 {"role": "user", "content": json.dumps(user_prompt)},

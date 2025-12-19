@@ -20,6 +20,16 @@ By default the server runs on http://localhost:5000.
     - `attachments`: zero or more files (supporting docs, supports PDF, XLSX, and text-like files)
   - response: structured JSON with metadata and LLM-parsed fields
 
+### LLM Output Schema
+
+The `llm_parsed.data` object follows this schema:
+
+- `broker_name`: string|null
+- `broker_email`: string|null
+- `brokerage`: string|null
+- `complete_brokerage_address`: string|null
+- `property_addresses`: array of strings (unique, one-line addresses)
+
 ### LLM Integration
 
 Set the following environment variable before running:
