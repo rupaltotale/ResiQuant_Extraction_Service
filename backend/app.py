@@ -8,34 +8,16 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Optional: OpenAI API integration
+# Model selection for OpenAI
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-HAVE_OPENAI = False
-try:
-    from openai import OpenAI  # type: ignore
-    HAVE_OPENAI = True
-except Exception:
-    HAVE_OPENAI = False
 
-# XLSX support
-HAVE_XLSX = False
-try:
-    import openpyxl  # type: ignore
-    HAVE_XLSX = True
-except Exception:
-    HAVE_XLSX = False
-
-# Try to enable basic PDF text extraction if pypdf is available
-try:
-    from pypdf import PdfReader  # type: ignore
-    HAVE_PDF = True
-except Exception:
-    HAVE_PDF = False
+# External dependencies (installed via requirements.txt)
+from openai import OpenAI  # OpenAI SDK
+import openpyxl  # XLSX parsing
+from pypdf import PdfReader  # PDF text extraction
 
 
 def extract_text_from_pdf(file_stream: io.BytesIO) -> str:
-    if not HAVE_PDF:
-        return ""
     try:
         reader = PdfReader(file_stream)
         texts = []
@@ -50,8 +32,6 @@ def extract_text_from_pdf(file_stream: io.BytesIO) -> str:
 
 
 def extract_text_from_xlsx(data: bytes, max_cells: int = 2000) -> str:
-    if not HAVE_XLSX:
-        return ""
     try:
         # Load workbook from bytes
         bio = io.BytesIO(data)
@@ -107,8 +87,8 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
     error payload while keeping the route successful.
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not HAVE_OPENAI or not api_key:
-        return {"status": "skipped", "reason": "missing_openai_key_or_sdk"}
+    if not api_key:
+        return {"status": "skipped", "reason": "missing_openai_key"}
 
     # Summarize attachments for the model
     attachments_summary = [
