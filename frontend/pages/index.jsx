@@ -390,6 +390,12 @@ export default function Home() {
                   </>
                 ); })()}
               </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                <div style={{ color: '#586069', fontSize: 12 }}>
+                  <strong>Latency:</strong> {typeof result.llm_latency_ms === 'number' ? `${(result.llm_latency_ms / 1000).toFixed(2)} s` : '—'}
+                  {result.llm_parsed?.cached ? <span style={{ marginLeft: 8 }}>(cached)</span> : null}
+                </div>
+              </div>
             </div>
           )}
 

@@ -506,6 +506,7 @@ def upload() -> Any:
         "attachments": attachments,
         "document_count": 1 + len(attachments),
         "llm_parsed": llm,
+        "llm_latency_ms": llm_latency_ms,
         "provenance": provenance,
     }
     status_code = 200
