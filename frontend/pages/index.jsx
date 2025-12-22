@@ -112,7 +112,7 @@ export default function Home() {
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
   const [guessMode, setGuessMode] = useState(true);
-  const [model, setModel] = useState('gpt-5');
+  const [model, setModel] = useState('gpt-4.1');
 
   const formatSize = (bytes) => {
     if (!bytes && bytes !== 0) return '—';
@@ -342,7 +342,7 @@ export default function Home() {
             aria-label="Model"
             style={{ padding: 8 }}
           >
-            <option value="gpt-5">GPT-5 (default)</option>
+            <option value="gpt-5">GPT-5</option>
             <option value="gpt-4.1">GPT-4.1</option>
             <option value="gpt-4o">GPT-4o</option>
             <option value="gpt-4o-mini">GPT-4o Mini</option>

@@ -21,7 +21,6 @@ try:
     load_dotenv(dotenv_path=_ENV_PATH)
 except Exception:
     pass
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
 # External dependencies (installed via requirements.txt)
 from openai import OpenAI  # OpenAI SDK
@@ -168,7 +167,7 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         return {"status": "skipped", "reason": "missing_openai_key"}
 
     # Select model (override or default)
-    used_model = (model or OPENAI_MODEL or "").strip() or OPENAI_MODEL
+    used_model = (model or "").strip()
 
     # Summarize attachments for the model
     attachments_summary = []
@@ -562,7 +561,7 @@ def upload() -> Any:
             "route": route,
             "source_hash": source_hash,
             "llm_latency_ms": llm_latency_ms,
-            "model": llm.get("model") or OPENAI_MODEL,
+            "model": llm.get("model"),
             "error_category": category,
             "message": msg[:300],
         })
@@ -592,7 +591,7 @@ def upload() -> Any:
         "cache_hit": bool(llm.get("cached")),
         "llm_status": llm.get("status"),
         "llm_latency_ms": llm_latency_ms,
-        "model": llm.get("model") or OPENAI_MODEL,
+        "model": llm.get("model"),
         "document_count": 1 + len(attachments),
         "guess_mode": guess_mode,
         "requested_model": requested_model or None,
