@@ -13,8 +13,8 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Model selection for OpenAI
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# Model selection for OpenAI (default to GPT-5 unless overridden)
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
 # External dependencies (installed via requirements.txt)
 from openai import OpenAI  # OpenAI SDK
@@ -44,10 +44,6 @@ def _json_log(level: str, payload: Dict[str, Any]) -> None:
     except Exception:
         # Best-effort logging fallback
         logger.log(lvl, str(payload))
-
-
-def _hash_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _hash_string(s: str) -> str:
@@ -107,7 +103,8 @@ def structure_document_json(filename: str, content_type: str, data: bytes) -> Di
     if content_type.lower() in ("application/pdf",) or filename.lower().endswith(".pdf"):
         text_preview = extract_text_from_pdf(io.BytesIO(data))[:2000]
     elif content_type.lower() in ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",) or filename.lower().endswith(".xlsx"):
-        text_preview = extract_text_from_xlsx(data)[:2000]
+        # Allow a longer preview for spreadsheets to capture full address tables
+        text_preview = extract_text_from_xlsx(data)[:8000]
     else:
         # naive text attempt for text-like files
         try:
@@ -136,19 +133,21 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         return {"status": "skipped", "reason": "missing_openai_key"}
 
     # Summarize attachments for the model
-    attachments_summary = [
-        {
+    attachments_summary = []
+    for a in attachments:
+        fn = (a.get("filename") or "").lower()
+        mt = (a.get("mime_type") or "").lower()
+        is_xlsx = fn.endswith(".xlsx") or mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        # Give more room to XLSX previews so the model sees complete rows
+        limit = 4000 if is_xlsx else 1000
+        attachments_summary.append({
             "filename": a.get("filename"),
             "mime_type": a.get("mime_type"),
             "size_bytes": a.get("size_bytes"),
-            # Include a short preview only if present
-            "text_preview": (a.get("text_preview") or "")[:500],
-        }
-        for a in attachments
-    ]
+            "text_preview": (a.get("text_preview") or "")[:limit],
+        })
 
     system_instructions = (
-        "You are a precise extraction assistant. "
         "Extract brokerage details and property addresses from the provided email thread text and attachment summaries. "
         "Always return strictly valid JSON that conforms to the schema. No extra text.\n\n"
         "Domain Context: The auto-ingest of insurance submission documents is a process that automates the current "
@@ -156,7 +155,9 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "of the properties requesting coverage such as construction class, occupancy type, number of stories, and others. "
         "These attributes are necessary for running a catastrophe model and providing a quote. Every insurance submission is different; "
         "each broker has their own document format and property data is often sparse, unstandardized, and unvetted. "
-        "Interpret fields semantically and prefer explicit mentions from the documents. If information is missing or uncertain, return null rather than guessing."
+        # "Interpret fields semantically. If information is missing entirely, return null rather than guessing.\n\n"
+        "Attachments may include tables or spreadsheets. Treat comma- or tab-separated rows and multi-line cells as structured records. "
+        # "When extracting addresses from tabular previews, infer row boundaries from line breaks and punctuation, and reconstruct one-line street addresses accordingly."
     )
 
     schema_description = (
@@ -186,13 +187,12 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "  }\n"
         "}\n"
         "Rules:\n"
-        "- Use the email thread text primarily; use attachment summaries as secondary hints.\n"
-        "- Citations must be snippets that include the exact matched text plus surrounding context (25–120 characters on each side) from the provided texts (email thread or attachment previews).\n"
+        "- Use the email thread text and all attachment summaries\n"
+        "- Citations must be snippets that include the exact matched text plus surrounding context (120 characters on each side) from the provided texts (email thread or attachment previews).\n"
         "- The \"source\" must be either \"email_pdf\" or the exact attachment filename provided.\n"
         "- If a field is not present, return null (and an empty citation list).\n"
-        "- \"property_addresses\" must be a list of unique, human-readable street addresses (one line each).\n"
-        "- Set \"confidence_overall\" to reflect your certainty (0..1).\n"
-        "- For each field, set \"field_confidence\" with a numeric score and a concise explanation that references specific evidence (e.g., a phrase inside the snippet).\n"
+        "- \"property_addresses\" must be a list of ALL property addresses found across the email and attachments.\n"
+        "- For each field, set \"field_confidence\" with a numeric score and a concise explanation for the score.\n"
         "- In citations, set \"match\" equal to the exact text you used to identify the field (e.g., the broker name or address).\n"
         "- Do not include commentary, only the JSON object."
     )
@@ -201,7 +201,6 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "email_thread_text": email_text,
         "attachments": attachments_summary,
         "instructions": schema_description,
-        "domain_context": "Insurance submissions vary widely; data may be sparse/unstandardized. Prefer explicit text; do not infer beyond the documents.",
     }
 
     # Cache key derived from content + model + instructions to avoid duplicate calls
@@ -222,15 +221,19 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
 
     try:
         client = OpenAI()
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
+        # Some models (e.g., gpt-5) do not accept non-default temperature; omit it for those.
+        create_args = {
+            "model": OPENAI_MODEL,
+            "response_format": {"type": "json_object"},
+            "messages": [
                 {"role": "system", "content": system_instructions},
                 {"role": "user", "content": json.dumps(user_prompt)},
             ],
-        )
+        }
+        if not str(OPENAI_MODEL).lower().startswith("gpt-5"):
+            create_args["temperature"] = 0
+
+        resp = client.chat.completions.create(**create_args)
         content = (resp.choices[0].message.content or "{}").strip()
         try:
             parsed = json.loads(content)

@@ -84,8 +84,8 @@ Set the following environment variable before running:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-# Optional: choose a model
-export OPENAI_MODEL="gpt-4o-mini"
+# Optional: choose a model (defaults to gpt-5)
+export OPENAI_MODEL="gpt-5"
 ```
 
 If `OPENAI_API_KEY` is not set, the backend still responds and includes `llm_parsed.status = "skipped"`.

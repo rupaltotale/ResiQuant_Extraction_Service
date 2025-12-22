@@ -16,7 +16,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY="sk-..."
 # optional
-export OPENAI_MODEL="gpt-4o-mini"
+export OPENAI_MODEL="gpt-5"
 python app.py
 ```
 Frontend:
@@ -32,8 +32,11 @@ npm run dev
 - Verify with `GET /health` and a small test upload.
 
 ## Model Tuning / Selection
-- Change `OPENAI_MODEL` env to try different models (e.g., speed/cost tradeoffs).
+- Default model is `gpt-5`. Change `OPENAI_MODEL` env to try different models (e.g., speed/cost tradeoffs).
 - If switching to a weaker model, consider increasing snippet context and adjusting prompts (see below).
+
+Temperature notes:
+- Some models (e.g., `gpt-5`) only support the default temperature. The backend automatically omits the `temperature` parameter for such models.
 
 ## Prompt Tuning
 - The prompt and schema live in `backend/app.py` inside `call_llm_for_structured_output()`:
