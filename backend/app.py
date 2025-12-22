@@ -157,7 +157,7 @@ def structure_document_json(filename: str, content_type: str, data: bytes) -> Di
     }
 
 
-def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, Any]], guess_mode: bool = True) -> Dict[str, Any]:
+def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, Any]], guess_mode: bool = True, model: Optional[str] = None) -> Dict[str, Any]:
     """
     Call OpenAI to produce a strict JSON extraction of the email thread.
     Returns a dict; if the API key is missing or an error occurs, returns an
@@ -166,6 +166,9 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return {"status": "skipped", "reason": "missing_openai_key"}
+
+    # Select model (override or default)
+    used_model = (model or OPENAI_MODEL or "").strip() or OPENAI_MODEL
 
     # Summarize attachments for the model
     attachments_summary = []
@@ -256,7 +259,7 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
     cache_key_payload = {
         "email_thread_text": email_text,
         "attachments": attachments_summary,
-        "model": OPENAI_MODEL,
+        "model": used_model,
         "instructions": schema_description,
         "guess_mode": bool(guess_mode),
     }
@@ -270,17 +273,18 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         return result
 
     try:
+        call_start_ms = _now_ms()
         client = OpenAI()
         # Some models (e.g., gpt-5) do not accept non-default temperature; omit it for those.
         create_args = {
-            "model": OPENAI_MODEL,
+            "model": used_model,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_instructions},
                 {"role": "user", "content": json.dumps(user_prompt)},
             ],
         }
-        if not str(OPENAI_MODEL).lower().startswith("gpt-5"):
+        if not str(used_model).lower().startswith("gpt-5"):
             create_args["temperature"] = 0
 
         resp = client.chat.completions.create(**create_args)
@@ -297,7 +301,8 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
             import re
             m = re.search(r"\{[\s\S]*\}", content)
             parsed = json.loads(m.group(0)) if m else {"raw": content}
-        result = {"status": "ok", "model": OPENAI_MODEL, "data": parsed}
+        latency_ms = _now_ms() - call_start_ms
+        result = {"status": "ok", "model": used_model, "data": parsed, "latency_ms": latency_ms}
         # Attach usage info
         if total_tokens is not None:
             result_usage = {
@@ -314,7 +319,15 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         LLM_CACHE[cache_key] = result
         return result
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        # Best-effort to include call latency on errors
+        try:
+            latency_ms = _now_ms() - call_start_ms  # type: ignore[name-defined]
+        except Exception:
+            latency_ms = None
+        err = {"status": "error", "message": str(e)}
+        if latency_ms is not None:
+            err["latency_ms"] = latency_ms
+        return err
 
 
 def _make_snippet(text: str, start: int, end: int, context: int = 120) -> str:
@@ -444,11 +457,12 @@ def upload() -> Any:
         return jsonify({"error": "No files provided"}), 400
 
     # New contract: one email chain PDF under 'email_pdf', zero or more attachments under 'attachments'
-    # Optional toggle: 'guess_mode' ("true"/"false") to control inference guidance
+    # Optional toggles: 'guess_mode' ("true"/"false") and 'model' to control inference guidance and model selection
     email_pdf = request.files.get('email_pdf')
     attachments_files = request.files.getlist('attachments')
     guess_mode_str = (request.form.get('guess_mode') or request.args.get('guess_mode') or 'true').strip().lower()
     guess_mode = guess_mode_str in ('true', '1', 'yes', 'on')
+    requested_model = (request.form.get('model') or request.args.get('model') or '').strip()
 
     # Expect explicit fields only: 'email_pdf' and optional 'attachments'
 
@@ -500,8 +514,8 @@ def upload() -> Any:
 
     # Call LLM for structured JSON
     llm_start = _now_ms()
-    llm = call_llm_for_structured_output(email_text=email_text, attachments=attachments, guess_mode=guess_mode)
-    llm_latency_ms = _now_ms() - llm_start
+    llm = call_llm_for_structured_output(email_text=email_text, attachments=attachments, guess_mode=guess_mode, model=requested_model or None)
+    llm_latency_ms = (llm.get("latency_ms") if isinstance(llm, dict) and llm.get("latency_ms") is not None else (_now_ms() - llm_start))
 
     provenance: Dict[str, List[Dict[str, Any]]] = {}
     if llm.get("status") == "ok":
@@ -581,6 +595,7 @@ def upload() -> Any:
         "model": llm.get("model") or OPENAI_MODEL,
         "document_count": 1 + len(attachments),
         "guess_mode": guess_mode,
+        "requested_model": requested_model or None,
         "broker_email_hash": broker_email_hash,
         "elapsed_ms": _now_ms() - req_start,
     })
