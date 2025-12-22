@@ -386,23 +386,42 @@ export default function Home() {
                   <Info sources={result.provenance?.complete_brokerage_address} confidence={fc.complete_brokerage_address} matchText={result.llm_parsed.data?.complete_brokerage_address} />
                 </div>
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <strong>Property Addresses:</strong>
-                    <Info sources={result.provenance?.property_addresses} confidence={fc.property_addresses} />
-                  </div>
-                  <ul style={{ marginTop: 6 }}>
-                    {(result.llm_parsed.data?.property_addresses || []).map((addr, i) => {
-                      const per = (fc.property_addresses?.per_address || []).find((x) => x && x.address === addr) || null;
-                      return (
-                        <li key={i} style={{ display: 'flex', alignItems: 'center' }}>
-                          <span>{addr}</span>
-                          {per && (
-                            <Info sources={null} confidence={{ score: per.score, explanation: per.explanation }} />
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
+                  {(() => {
+                    const addresses = result.llm_parsed.data?.property_addresses || [];
+                    const perList = (fc.property_addresses?.per_address || []);
+                    const allPropSources = result.provenance?.property_addresses || [];
+                    return (
+                      <>
+                        <div style={{ display: 'flex', alignItems: 'center' }}>
+                          <strong>Property Addresses</strong>
+                          <span style={{ marginLeft: 6, color: '#586069' }}>({addresses.length})</span>
+                        </div>
+                        <ol style={{ marginTop: 6, listStyleType: 'decimal', paddingLeft: 50 }}>
+                          {addresses.map((addr, i) => {
+                            const per = perList.find((x) => x && x.address === addr) || null;
+                            const addrSources = allPropSources.filter((s) => {
+                              const m = (s && s.match) ? String(s.match) : '';
+                              const snip = (s && s.snippet) ? String(s.snippet) : '';
+                              const a = String(addr || '');
+                              return (m && m === a) || (snip && snip.toLowerCase().includes(a.toLowerCase()));
+                            });
+                            return (
+                              <li key={i} style={{ margin: '4px 0' }}>
+                                <span>{addr}</span>
+                                <span style={{ marginLeft: 6 }}>
+                                  <Info
+                                    sources={addrSources}
+                                    confidence={per ? { score: per.score, explanation: per.explanation } : null}
+                                    matchText={addr}
+                                  />
+                                </span>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      </>
+                    );
+                  })()}
                 </div>
                   </>
                 ); })()}
