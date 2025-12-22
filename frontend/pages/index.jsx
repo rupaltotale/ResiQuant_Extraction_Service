@@ -111,6 +111,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
+  const [guessMode, setGuessMode] = useState(true);
 
   const formatSize = (bytes) => {
     if (!bytes && bytes !== 0) return '—';
@@ -175,6 +176,7 @@ export default function Home() {
       for (const f of attachments) {
         formData.append('attachments', f);
       }
+      formData.append('guess_mode', guessMode ? 'true' : 'false');
 
       const res = await fetch(`${BACKEND_URL}/api/upload`, {
         method: 'POST',
@@ -303,6 +305,27 @@ export default function Home() {
               })}
             </div>
           )}
+        </div>
+
+        <div style={{
+          border: '1px solid #e1e4e8',
+          borderRadius: 6,
+          padding: 10,
+          background: '#fafbfc'
+        }}>
+          <label htmlFor="guess-mode" style={{ fontWeight: 600 }}>Guess Mode</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+            <input
+              id="guess-mode"
+              type="checkbox"
+              checked={guessMode}
+              onChange={(e) => setGuessMode(e.target.checked)}
+              disabled={loading}
+            />
+            <small style={{ color: '#586069' }}>
+              When off, the model returns null for missing fields and avoids inference.
+            </small>
+          </div>
         </div>
 
         <button type="submit" disabled={loading} style={{ padding: '10px 14px' }}>

@@ -122,7 +122,7 @@ def structure_document_json(filename: str, content_type: str, data: bytes) -> Di
     }
 
 
-def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, Any]]) -> Dict[str, Any]:
+def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, Any]], guess_mode: bool = True) -> Dict[str, Any]:
     """
     Call OpenAI to produce a strict JSON extraction of the email thread.
     Returns a dict; if the API key is missing or an error occurs, returns an
@@ -147,19 +147,41 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
             "text_preview": (a.get("text_preview") or "")[:limit],
         })
 
-    system_instructions = (
+    base_instructions = (
         "Extract brokerage details and property addresses from the provided email thread text and attachment summaries. "
         "Always return strictly valid JSON that conforms to the schema. No extra text.\n\n"
         "Domain Context: The auto-ingest of insurance submission documents is a process that automates the current "
         "manual process of reading insurance email submissions (and attachments) to extract relevant building attributes "
         "of the properties requesting coverage such as construction class, occupancy type, number of stories, and others. "
         "These attributes are necessary for running a catastrophe model and providing a quote. Every insurance submission is different; "
-        "each broker has their own document format and property data is often sparse, unstandardized, and unvetted. "
-        # "Interpret fields semantically. If information is missing entirely, return null rather than guessing.\n\n"
+        "each broker has their own document format and property data is often sparse, unstandardized, and unvetted. \n\n"
         "Attachments may include tables or spreadsheets. Treat comma- or tab-separated rows and multi-line cells as structured records. "
-        # "When extracting addresses from tabular previews, infer row boundaries from line breaks and punctuation, and reconstruct one-line street addresses accordingly."
     )
+    strict_guidance = (
+        "Interpret fields semantically and prefer explicit mentions from the documents. "
+        "If information is missing entirely, return null rather than guessing.\n\n"
+    )
+    infer_guidance = (
+        "Interpret fields semantically and prefer explicit mentions. "
+        "If information appears implied but not explicitly stated, you may infer cautiously from context, "
+        "but reduce confidence and explain the inference clearly.\n\n"
+    )
+    system_instructions = base_instructions + (strict_guidance if not guess_mode else infer_guidance)
 
+    rules_common = (
+        "Rules:\n"
+        "- Use the email thread text and all attachment summaries\n"
+        "- Citations must be snippets that include the exact matched text plus surrounding context (120 characters on each side) from the provided texts (email thread or attachment previews).\n"
+        "- The \"source\" must be either \"email_pdf\" or the exact attachment filename provided.\n"
+        "- \"property_addresses\" must be a list of ALL property addresses found across the email and attachments.\n"
+        "- For each field, set \"field_confidence\" with a numeric score and a concise explanation for the score.\n"
+        "- In citations, set \"match\" equal to the exact text you used to identify the field (e.g., the broker name or address).\n"
+    )
+    rules_strict = "- If a field is not present explicitly, return null (and an empty citation list).\n"
+    rules_infer = (
+        "- If a field is not present explicitly, you may infer from context; "
+        "provide citations to the closest evidence, set a lower confidence, and explain the uncertainty.\n"
+    )
     schema_description = (
         "Return a JSON object with exactly these fields and types:\n"
         "{\n"
@@ -185,22 +207,14 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "    \"complete_brokerage_address\": { \"score\": number, \"explanation\": string },\n"
         "    \"property_addresses\": { \"score\": number, \"explanation\": string, \"per_address\": [ { \"address\": string, \"score\": number, \"explanation\": string } ] }\n"
         "  }\n"
-        "}\n"
-        "Rules:\n"
-        "- Use the email thread text and all attachment summaries\n"
-        "- Citations must be snippets that include the exact matched text plus surrounding context (120 characters on each side) from the provided texts (email thread or attachment previews).\n"
-        "- The \"source\" must be either \"email_pdf\" or the exact attachment filename provided.\n"
-        "- If a field is not present, return null (and an empty citation list).\n"
-        "- \"property_addresses\" must be a list of ALL property addresses found across the email and attachments.\n"
-        "- For each field, set \"field_confidence\" with a numeric score and a concise explanation for the score.\n"
-        "- In citations, set \"match\" equal to the exact text you used to identify the field (e.g., the broker name or address).\n"
-        "- Do not include commentary, only the JSON object."
+        "}\n" + rules_common + (rules_strict if not guess_mode else rules_infer) + "- Do not include commentary, only the JSON object."
     )
 
     user_prompt = {
         "email_thread_text": email_text,
         "attachments": attachments_summary,
         "instructions": schema_description,
+        "options": {"guess_mode": bool(guess_mode)},
     }
 
     # Cache key derived from content + model + instructions to avoid duplicate calls
@@ -209,6 +223,7 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "attachments": attachments_summary,
         "model": OPENAI_MODEL,
         "instructions": schema_description,
+        "guess_mode": bool(guess_mode),
     }
     cache_key = hashlib.sha256(json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -377,8 +392,11 @@ def upload() -> Any:
         return jsonify({"error": "No files provided"}), 400
 
     # New contract: one email chain PDF under 'email_pdf', zero or more attachments under 'attachments'
+    # Optional toggle: 'guess_mode' ("true"/"false") to control inference guidance
     email_pdf = request.files.get('email_pdf')
     attachments_files = request.files.getlist('attachments')
+    guess_mode_str = (request.form.get('guess_mode') or request.args.get('guess_mode') or 'true').strip().lower()
+    guess_mode = guess_mode_str in ('true', '1', 'yes', 'on')
 
     # Expect explicit fields only: 'email_pdf' and optional 'attachments'
 
@@ -430,7 +448,7 @@ def upload() -> Any:
 
     # Call LLM for structured JSON
     llm_start = _now_ms()
-    llm = call_llm_for_structured_output(email_text=email_text, attachments=attachments)
+    llm = call_llm_for_structured_output(email_text=email_text, attachments=attachments, guess_mode=guess_mode)
     llm_latency_ms = _now_ms() - llm_start
 
     provenance: Dict[str, List[Dict[str, Any]]] = {}
@@ -507,6 +525,7 @@ def upload() -> Any:
         "llm_latency_ms": llm_latency_ms,
         "model": llm.get("model") or OPENAI_MODEL,
         "document_count": 1 + len(attachments),
+        "guess_mode": guess_mode,
         "broker_email_hash": broker_email_hash,
         "elapsed_ms": _now_ms() - req_start,
     })
