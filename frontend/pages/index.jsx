@@ -391,9 +391,23 @@ export default function Home() {
                 ); })()}
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-                <div style={{ color: '#586069', fontSize: 12 }}>
-                  <strong>Latency:</strong> {typeof result.llm_latency_ms === 'number' ? `${(result.llm_latency_ms / 1000).toFixed(2)} s` : '—'}
-                  {result.llm_parsed?.cached ? <span style={{ marginLeft: 8 }}>(cached)</span> : null}
+                <div style={{ color: '#586069', fontSize: 12, display: 'flex', gap: 12 }}>
+                  <span>
+                    <strong>Latency:</strong> {typeof result.llm_latency_ms === 'number' ? `${(result.llm_latency_ms / 1000).toFixed(2)} s` : '—'}
+                  </span>
+                  <span>
+                    <strong>Tokens:</strong> {(() => {
+                      const u = result.llm_usage || {};
+                      const pt = typeof u.prompt_tokens === 'number' ? u.prompt_tokens : '—';
+                      const ct = typeof u.completion_tokens === 'number' ? u.completion_tokens : '—';
+                      const tt = typeof u.total_tokens === 'number' ? u.total_tokens : '—';
+                      return `${pt} in / ${ct} out / ${tt} total`;
+                    })()}
+                  </span>
+                  <span>
+                    <strong>Cost:</strong> {typeof result.llm_cost?.total_cost === 'number' ? `$${result.llm_cost.total_cost.toFixed(4)}` : '—'}
+                  </span>
+                  {result.llm_parsed?.cached ? <span>(cached)</span> : null}
                 </div>
               </div>
             </div>

@@ -9,11 +9,18 @@ import re
 from typing import List, Dict, Any, Optional
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
 
 app = Flask(__name__)
 CORS(app)
 
 # Model selection for OpenAI (default to GPT-5 unless overridden)
+# Load .env from the backend directory before reading environment variables
+try:
+    _ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+    load_dotenv(dotenv_path=_ENV_PATH)
+except Exception:
+    pass
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
 # External dependencies (installed via requirements.txt)
@@ -48,6 +55,34 @@ def _json_log(level: str, payload: Dict[str, Any]) -> None:
 
 def _hash_string(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def compute_cost_from_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Compute cost in USD given a usage dict with prompt/completion tokens.
+
+    Expects env vars OPENAI_PRICE_INPUT_PER_1K and OPENAI_PRICE_OUTPUT_PER_1K
+    representing USD cost per 1K input and output tokens respectively.
+    """
+    if not usage or not isinstance(usage, dict):
+        return None
+    pt = usage.get("prompt_tokens") or 0
+    ct = usage.get("completion_tokens") or 0
+    try:
+        price_in = float(os.environ.get("OPENAI_PRICE_INPUT_PER_1K", ""))
+        price_out = float(os.environ.get("OPENAI_PRICE_OUTPUT_PER_1K", ""))
+    except Exception:
+        return None
+    if not isinstance(price_in, (int, float)) or not isinstance(price_out, (int, float)):
+        return None
+    input_cost = (float(pt) / 1000.0) * float(price_in)
+    output_cost = (float(ct) / 1000.0) * float(price_out)
+    total_cost = input_cost + output_cost
+    return {
+        "currency": "USD",
+        "input_cost": round(input_cost, 6),
+        "output_cost": round(output_cost, 6),
+        "total_cost": round(total_cost, 6),
+    }
 
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -250,6 +285,11 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
 
         resp = client.chat.completions.create(**create_args)
         content = (resp.choices[0].message.content or "{}").strip()
+        # Token usage (if provided by provider)
+        usage = getattr(resp, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
         try:
             parsed = json.loads(content)
         except Exception:
@@ -258,6 +298,18 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
             m = re.search(r"\{[\s\S]*\}", content)
             parsed = json.loads(m.group(0)) if m else {"raw": content}
         result = {"status": "ok", "model": OPENAI_MODEL, "data": parsed}
+        # Attach usage info
+        if total_tokens is not None:
+            result_usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            }
+            result["usage"] = result_usage
+            # Attach computed cost
+            cost = compute_cost_from_usage(result_usage)
+            if cost:
+                result["cost"] = cost
         # Store successful responses in cache
         LLM_CACHE[cache_key] = result
         return result
@@ -507,6 +559,8 @@ def upload() -> Any:
         "document_count": 1 + len(attachments),
         "llm_parsed": llm,
         "llm_latency_ms": llm_latency_ms,
+        "llm_usage": llm.get("usage"),
+        "llm_cost": llm.get("cost"),
         "provenance": provenance,
     }
     status_code = 200
