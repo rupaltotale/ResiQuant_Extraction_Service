@@ -156,33 +156,34 @@ def structure_document_json(filename: str, content_type: str, data: bytes) -> Di
     }
 
 
-def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, Any]], guess_mode: bool = True, model: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Call OpenAI to produce a strict JSON extraction of the email thread.
-    Returns a dict; if the API key is missing or an error occurs, returns an
-    error payload while keeping the route successful.
-    """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return {"status": "skipped", "reason": "missing_openai_key"}
+def summarize_attachments_for_llm(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Produce concise attachment summaries for the LLM.
 
-    # Select model (override or default)
-    used_model = (model or "").strip()
-
-    # Summarize attachments for the model
-    attachments_summary = []
+    - PDFs and text-like files are truncated to ~1000 chars
+    - XLSX previews are given a larger budget (~4000 chars) to preserve rows
+    """
+    summaries: List[Dict[str, Any]] = []
     for a in attachments:
         fn = (a.get("filename") or "").lower()
         mt = (a.get("mime_type") or "").lower()
         is_xlsx = fn.endswith(".xlsx") or mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        # Give more room to XLSX previews so the model sees complete rows
         limit = 4000 if is_xlsx else 1000
-        attachments_summary.append({
+        summaries.append({
             "filename": a.get("filename"),
             "mime_type": a.get("mime_type"),
             "size_bytes": a.get("size_bytes"),
             "text_preview": (a.get("text_preview") or "")[:limit],
         })
+    return summaries
+
+
+def build_llm_context(email_text: str, attachments: List[Dict[str, Any]], guess_mode: bool) -> Dict[str, Any]:
+    """Create instructions and prompt payload used for LLM extraction.
+
+    Returns dict with keys: attachments_summary, system_instructions,
+    schema_description, user_prompt.
+    """
+    attachments_summary = summarize_attachments_for_llm(attachments)
 
     base_instructions = (
         "Extract brokerage details and property addresses from the provided email thread text and attachment summaries. "
@@ -200,7 +201,7 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
     )
     infer_guidance = (
         "Interpret fields semantically and prefer explicit mentions. "
-        "If information appears implied but not explicitly stated, you may infer cautiously from context, "
+        "If information appears implied but not explicitly stated, you may infer from context, "
         "but reduce confidence and explain the inference clearly.\n\n"
     )
     system_instructions = base_instructions + (strict_guidance if not guess_mode else infer_guidance)
@@ -254,6 +255,34 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         "options": {"guess_mode": bool(guess_mode)},
     }
 
+    return {
+        "attachments_summary": attachments_summary,
+        "system_instructions": system_instructions,
+        "schema_description": schema_description,
+        "user_prompt": user_prompt,
+    }
+
+
+def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, Any]], guess_mode: bool = True, model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Call OpenAI to produce a strict JSON extraction of the email thread.
+    Returns a dict; if the API key is missing or an error occurs, returns an
+    error payload while keeping the route successful.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return {"status": "skipped", "reason": "missing_openai_key"}
+
+    # Select model (override or default)
+    used_model = (model or "").strip()
+
+    # Build context and prompt for the LLM
+    ctx = build_llm_context(email_text=email_text, attachments=attachments, guess_mode=guess_mode)
+    attachments_summary = ctx["attachments_summary"]
+    system_instructions = ctx["system_instructions"]
+    schema_description = ctx["schema_description"]
+    user_prompt = ctx["user_prompt"]
+
     # Cache key derived from content + model + instructions to avoid duplicate calls
     cache_key_payload = {
         "email_thread_text": email_text,
@@ -296,13 +325,10 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
         try:
             parsed = json.loads(content)
         except Exception:
-            # Attempt to salvage JSON from content
-            import re
             m = re.search(r"\{[\s\S]*\}", content)
             parsed = json.loads(m.group(0)) if m else {"raw": content}
         latency_ms = _now_ms() - call_start_ms
         result = {"status": "ok", "model": used_model, "data": parsed, "latency_ms": latency_ms}
-        # Attach usage info
         if total_tokens is not None:
             result_usage = {
                 "prompt_tokens": prompt_tokens,
@@ -310,11 +336,9 @@ def call_llm_for_structured_output(email_text: str, attachments: List[Dict[str, 
                 "total_tokens": total_tokens,
             }
             result["usage"] = result_usage
-            # Attach computed cost
             cost = compute_cost_from_usage(result_usage)
             if cost:
                 result["cost"] = cost
-        # Store successful responses in cache
         LLM_CACHE[cache_key] = result
         return result
     except Exception as e:
@@ -369,71 +393,6 @@ def find_in_text(text: str, term: str) -> Optional[str]:
     if pos == -1:
         return None
     return _make_snippet(text, pos, pos + len(term))
-
-
-def compute_provenance(
-    email_pdf_bytes: bytes,
-    email_pdf_name: str,
-    attachments_raw: List[Dict[str, Any]],
-    llm_data: Dict[str, Any],
-) -> Dict[str, List[Dict[str, Any]]]:
-    """Compute provenance for extracted fields by searching source texts.
-
-    Produces a map of field -> [{ doc, page, snippet }].
-    - Searches across the email PDF (page-level) and attachments (PDF page-level or text preview).
-    """
-    provenance: Dict[str, List[Dict[str, Any]]] = {}
-
-    def add_prov(field: str, doc: str, page: Optional[int], snippet: Optional[str], match: Optional[str] = None):
-        if not snippet:
-            return
-        entry = {
-            "doc": doc,
-            "page": page,
-            "snippet": snippet,
-        }
-        if isinstance(match, str) and match.strip():
-            entry["match"] = match
-        provenance.setdefault(field, []).append(entry)
-
-    # Scalar fields
-    for field in ["broker_name", "broker_email", "brokerage", "complete_brokerage_address"]:
-        val = llm_data.get(field)
-        if isinstance(val, str) and val.strip():
-            # Search email PDF pages
-            for hit in find_in_pdf(email_pdf_bytes, val, max_hits=1):
-                add_prov(field, email_pdf_name or "email_pdf", hit.get("page"), hit.get("snippet"), match=val)
-            # Search attachments previews and PDFs
-            for att in attachments_raw:
-                # Try PDF page search if PDF
-                if (att.get("mimetype", "").lower() == "application/pdf") or (att.get("filename", "").lower().endswith(".pdf")):
-                    for hit in find_in_pdf(att.get("data", b""), val, max_hits=1):
-                        add_prov(field, att.get("filename") or "attachment", hit.get("page"), hit.get("snippet"), match=val)
-                else:
-                    snip = find_in_text(att.get("text_preview", ""), val)
-                    if snip:
-                        add_prov(field, att.get("filename") or "attachment", None, snip, match=val)
-
-    # List of addresses
-    addrs = llm_data.get("property_addresses") or []
-    if isinstance(addrs, list):
-        for addr in addrs:
-            if not isinstance(addr, str) or not addr.strip():
-                continue
-            field = "property_addresses"
-            for hit in find_in_pdf(email_pdf_bytes, addr, max_hits=1):
-                add_prov(field, email_pdf_name or "email_pdf", hit.get("page"), hit.get("snippet"), match=addr)
-            for att in attachments_raw:
-                if (att.get("mimetype", "").lower() == "application/pdf") or (att.get("filename", "").lower().endswith(".pdf")):
-                    for hit in find_in_pdf(att.get("data", b""), addr, max_hits=1):
-                        add_prov(field, att.get("filename") or "attachment", hit.get("page"), hit.get("snippet"), match=addr)
-                else:
-                    snip = find_in_text(att.get("text_preview", ""), addr)
-                    if snip:
-                        add_prov(field, att.get("filename") or "attachment", None, snip, match=addr)
-
-    return provenance
-
 
 @app.get("/health")
 def health() -> Any:
@@ -540,14 +499,8 @@ def upload() -> Any:
                         if isinstance(match, str) and match.strip():
                             entry["match"] = match
                         provenance.setdefault(field, []).append(entry)
-        # Fallback to computed provenance if citations missing
-        if not provenance:
-            provenance = compute_provenance(
-                email_pdf_bytes=email_data,
-                email_pdf_name=email_pdf.filename or "email_pdf",
-                attachments_raw=attachment_raw,
-                llm_data=data_obj,
-            )
+
+                    
     elif llm.get("status") == "error":
         # Categorize provider errors
         msg = (llm.get("message") or "").lower()

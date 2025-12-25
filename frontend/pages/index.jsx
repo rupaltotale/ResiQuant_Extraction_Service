@@ -399,18 +399,12 @@ export default function Home() {
                         <ol style={{ marginTop: 6, listStyleType: 'decimal', paddingLeft: 50 }}>
                           {addresses.map((addr, i) => {
                             const per = perList.find((x) => x && x.address === addr) || null;
-                            const addrSources = allPropSources.filter((s) => {
-                              const m = (s && s.match) ? String(s.match) : '';
-                              const snip = (s && s.snippet) ? String(s.snippet) : '';
-                              const a = String(addr || '');
-                              return (m && m === a) || (snip && snip.toLowerCase().includes(a.toLowerCase()));
-                            });
                             return (
                               <li key={i} style={{ margin: '4px 0' }}>
                                 <span>{addr}</span>
                                 <span style={{ marginLeft: 6 }}>
                                   <Info
-                                    sources={addrSources}
+                                    sources={[allPropSources[i]]}
                                     confidence={per ? { score: per.score, explanation: per.explanation } : null}
                                     matchText={addr}
                                   />
